@@ -1,6 +1,25 @@
+version: '3.8'
+
 services:
+  db:
+    image: postgres:13
+    container_name: auth_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER1}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD1}
+      POSTGRES_DB: ${POSTGRES_DB1}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER1} -d ${POSTGRES_DB1}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   minio:
-    image: minio/minio:RELEASE.2024-04-18T19-09-19Z
+    image: minio/minio:RELEASE.2023-10-25T06-33-25Z
     container_name: minio
     ports:
       - "9000:9000"
@@ -11,15 +30,12 @@ services:
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - app-network
-
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -37,113 +53,106 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
     restart: "no"
-    networks:
-      - app-network
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:23.11
-    container_name: clickhouse
-    ports:
-      - "8123:8123"
-      - "9009:9000"
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.1
     environment:
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse-init-scripts:/docker-entrypoint-initdb.d
-    restart: unless-stopped
-    networks:
-      - app-network
-
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgres-init-scripts:/docker-entrypoint-initdb.d
-    restart: unless-stopped
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - app-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.1
+    ports:
+      - "9092:9092"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
 
   spark-master:
-    image: bitnami/spark:3.5
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: spark-master
     environment:
-      SPARK_MODE: master
-      SPARK_RPC_AUTHENTICATION_ENABLED: no
-      SPARK_RPC_ENCRYPTION_ENABLED: no
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: no
-      SPARK_SSL_ENABLED: no
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_SQL_EXTENSIONS=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      - SPARK_SQL_CATALOG_SPARK_CATALOG=org.apache.iceberg.spark.SparkCatalog
+      - SPARK_SQL_CATALOG_SPARK_CATALOG_TYPE=hadoop
+      - SPARK_SQL_CATALOG_SPARK_CATALOG_WAREHOUSE=s3a://${MINIO_BUCKET_NAME}/
+      - SPARK_HADOOP_FS_S3A_ENDPOINT=http://minio:9000
+      - SPARK_HADOOP_FS_S3A_ACCESS_KEY=${MINIO_ROOT_USER}
+      - SPARK_HADOOP_FS_S3A_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
     ports:
       - "7077:7077"
       - "8080:8080"
-    restart: unless-stopped
-    networks:
-      - app-network
+    volumes:
+      - ./spark/spark_jobs:/app/spark_jobs
+      - ./spark/conf:/opt/bitnami/spark/conf
+    depends_on:
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
 
   spark-worker:
-    image: bitnami/spark:3.5
+    image: bitnami/spark:3.4
     container_name: spark-worker
     depends_on:
       spark-master:
         condition: service_started
     environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
-      SPARK_WORKER_MEMORY: 1G
-      SPARK_RPC_AUTHENTICATION_ENABLED: no
-      SPARK_RPC_ENCRYPTION_ENABLED: no
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: no
-      SPARK_SSL_ENABLED: no
-    ports:
-      - "8081:8081"
-    restart: unless-stopped
-    networks:
-      - app-network
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./api/spark_jobs:/app/spark_jobs
 
-  spark-batch:
+  service:
     build:
-      context: ./spark-batch
+      context: .
       dockerfile: Dockerfile
-    container_name: spark-batch
+    container_name: combined_service
     depends_on:
-      - spark-master
-      - postgres
-      - clickhouse
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      spark-master:
+        condition: service_started
     environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/default
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-    restart: "no"
-    networks:
-      - app-network
+      DATABASE_URL: ${DATABASE_URL}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    volumes:
+      - ./auth_db:/app/auth_db
+      - ./api:/app/api
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
-  minio_data:
-  clickhouse_data:
   postgres_data:
-
-networks:
-  app-network:
-    driver: bridge
+  minio_data:
