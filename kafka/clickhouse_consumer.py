@@ -1,9 +1,16 @@
 import os
 import time
 import json
+from clickhouse_driver import Client as CHClient
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
 bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+CLICKHOUSE_HOST = os.getenv('CLICKHOUSE_HOST', 'clickhouse')
+CLICKHOUSE_PORT = int(os.getenv('CLICKHOUSE_PORT', '9000'))
+CLICKHOUSE_PORT = int(os.getenv('CLICKHOUSE_PORT', 9000))
+CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'default')
+
+ch_client = CHClient(host=CLICKHOUSE_HOST, port=CLICKHOUSE_PORT, database=CLICKHOUSE_DB)
 
 def run_consumer(topic_name='purchases'):
     conf = {
@@ -15,7 +22,7 @@ def run_consumer(topic_name='purchases'):
     consumer = Consumer(conf)
     consumer.subscribe([topic_name])
 
-    print(f"Консъюмер запущен")
+    print("Консъюмер запущен (ClickHouse)")
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
@@ -42,11 +49,22 @@ def run_consumer(topic_name='purchases'):
                 product_id = record.get('product_id')
                 price = record.get('price')
                 seller_id = record.get('seller_id')
+                quantity = record.get('quantity')
 
-                # здесь должен быть запрос с обновлением бд clickhouse<------------------------------------------------------------!!!!!!!!!!
+                try:
+                    ch_client.execute(
+                        """
+                        INSERT INTO fact_sales (sale_id, customer_id, product_id, seller_id, quantity, price)
+                        VALUES
+                    """,
+                        [(sell_id, customer_id, product_id, seller_id, quantity, price)]
+                    )
+                    print("Вставлено сообщение в ClickHouse")
+                except Exception as e:
+                    print(f"Ошибка при вставке в ClickHouse: {e}")
 
     except KeyboardInterrupt:
-        print("Остановка консъюмера")
+        print("Остановка консюмера")
     finally:
         consumer.close()
 

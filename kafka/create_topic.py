@@ -16,3 +16,7 @@ def create_topic():
         num_partitions=1,
         replication_factor=1
     )
+
+if __name__ == "__main__":
+    create_topic()
+    print("topic created")
