@@ -22,10 +22,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY auth_db/ ./auth_db/
 COPY api/ ./api/
 
-COPY api/entrypoint.sh .
-RUN chmod +x entrypoint.sh && \
-    sed -i 's/\r$//' entrypoint.sh
-
 EXPOSE 8000 8001
 
-CMD ["sh", "-c", "cd auth_db && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 & cd /app/api && ./entrypoint.sh && uvicorn main:app --host 0.0.0.0 --port 8001"]
+CMD ["sh", "-c", "cd auth_db && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 & cd /app/api && uvicorn main:app --host 0.0.0.0 --port 8001"]

@@ -5,6 +5,11 @@ from auth_db.app.database import verify_session, get_db
 from auth_db.app.main import get_user_role
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+import asyncio
+from fastapi import BackgroundTasks
+from typing import Dict
+from fastapi import BackgroundTasks
+from fastapi.logger import logger
 import json
 import subprocess
 from datetime import datetime
@@ -36,6 +41,8 @@ class UpdateProductRequest(BaseModel):
     product_id: str
     product_name: str
     price: float
+
+import asyncio
 
 @app.post("/init-products")
 async def init_products():

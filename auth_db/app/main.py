@@ -2,12 +2,14 @@ from fastapi import FastAPI, HTTPException, Form, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import update
 from kafka import KafkaProducer
 from passlib.context import CryptContext
 from .models import User, Session as UserSession
 from typing import Literal
 from . import database, models
 from .database import get_db, verify_session
+from .external_db import get_external_db
 from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime, timedelta
@@ -42,16 +44,73 @@ async def startup():
 @app.post("/register/")
 async def register_user(request: RegisterUserRequest, db: Session = Depends(get_db)):
     hashed_password = pwd_context.hash(request.user_password)
-    expected_role = ['seller', 'customer']
-    new_user = User(user_login=request.user_login, user_password=hashed_password, user_role=request.user_role)
-    if request.user_role not in expected_role:
-        raise HTTPException(status_code=400, detail="Invalid role. It must be one of 'admin', 'seller' or 'customer'")
+    expected_roles = ['seller', 'customer']
+    
+    if request.user_role not in expected_roles:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'seller' or 'customer'")
 
+    if db.query(User).filter(User.user_login == request.user_login).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    new_user = User(
+        user_login=request.user_login,
+        user_password=hashed_password,
+        user_role=request.user_role
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    return {"message": "User registered successfully"}
+    ext_id = None
+
+    try:
+        with get_external_db() as ext_conn, ext_conn.cursor() as cursor:
+            email = f"{new_user.user_login}@example.com"
+            
+            if request.user_role == 'customer':
+                cursor.execute("""
+                    INSERT INTO customers (username, email)
+                    VALUES (%s, %s)
+                    ON CONFLICT (username) DO UPDATE
+                    SET email = EXCLUDED.email
+                    RETURNING customer_id
+                    """,
+                    (new_user.user_login, email)
+                )
+            else:
+                cursor.execute("""
+                    INSERT INTO sellers (username, email)
+                    VALUES (%s, %s)
+                    ON CONFLICT (username) DO UPDATE
+                    SET email = EXCLUDED.email
+                    RETURNING seller_id
+                    """,
+                    (new_user.user_login, email)
+                )
+            
+            ext_id = cursor.fetchone()[0]
+            ext_conn.commit()
+
+            stmt = update(User).where(User.id == new_user.id).values(external_id=ext_id)
+            db.execute(stmt)
+            db.commit()
+
+    except Exception as e:
+        db.rollback()
+        db.query(User).filter(User.id == new_user.id).delete()
+        db.commit()
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to sync with external DB: {str(e)}"
+        )
+
+    return {
+        "message": "User registered successfully",
+        "internal_id": new_user.id,
+        "external_id": ext_id,
+        "role": request.user_role
+    }
 
 @app.post("/login/")
 async def login(response: Response, request: LoginUserRequest, db: Session = Depends(get_db)):

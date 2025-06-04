@@ -17,6 +17,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app-network
 
   minio:
     image: minio/minio:RELEASE.2023-10-25T06-33-25Z
@@ -64,9 +66,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app-network
 
   kafka:
     image: confluentinc/cp-kafka:7.5.1
+    hostname: kafka
+    container_name: kafka
     ports:
       - "9092:9092"
     depends_on:
@@ -77,6 +83,45 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: |
+        bash -c "
+        kafka-topics --bootstrap-server kafka:9092 --list || exit 1
+        "
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - app-network
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.5.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: |
+      bash -c "
+      echo 'Waiting for Kafka to be ready...'
+      while ! nc -z kafka 9092; do sleep 1; done
+      
+      echo 'Creating topics...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic purchases \
+        --partitions 3 \
+        --replication-factor 1
+      
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic user_events \
+        --partitions 3 \
+        --replication-factor 1
+      
+      echo 'Topics created successfully'
+      "
+    restart: on-failure
+    networks:
+      - app-network
 
   spark-master:
     build:
@@ -152,7 +197,15 @@ services:
       - ./auth_db:/app/auth_db
       - ./api:/app/api
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - app-network
 
 volumes:
   postgres_data:
   minio_data:
+
+networks:
+  app-network:
+    name: my_shared_network
+    driver: bridge
+    attachable: true
