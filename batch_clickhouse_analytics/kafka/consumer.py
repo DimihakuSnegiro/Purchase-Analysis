@@ -72,16 +72,16 @@ def run_consumer(topic_name='purchases'):
                     INSERT INTO fact_sales (sale_id, customer_id, product_id, seller_id, quantity)
                     VALUES
                 """, [(sell_id, customer_id, product_id, seller_id, quantity)])
-                print("✅ Вставлено сообщение в ClickHouse")
+                print("Вставлено сообщение в ClickHouse")
             except Exception as e:
-                print(f"❌ Ошибка при вставке в ClickHouse: {e}")
+                print(f"Ошибка при вставке в ClickHouse: {e}")
 
     except KeyboardInterrupt:
-        print("🛑 Остановка консюмера вручную")
+        print("Остановка консюмера вручную")
     finally:
         consumer.close()
-        print("🔚 Консьюмер закрыт")
+        print("Консьюмер закрыт")
 
 if __name__ == "__main__":
-    time.sleep(3)  # Небольшая задержка на старте
+    time.sleep(3)
     run_consumer()
