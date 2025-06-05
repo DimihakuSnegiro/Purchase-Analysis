@@ -4,7 +4,6 @@ import json
 from clickhouse_driver import Client as CHClient
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
-# Конфигурация окружения
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
 CLICKHOUSE_HOST = os.getenv('CLICKHOUSE_HOST', 'clickhouse')
 CLICKHOUSE_PORT = int(os.getenv('CLICKHOUSE_PORT', '9000'))
@@ -12,7 +11,6 @@ CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'default')
 CLICKHOUSE_USER = os.getenv('CLICKHOUSE_USER', 'default')
 CLICKHOUSE_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')
 
-# Подключение к ClickHouse
 ch_client = CHClient(
     host=CLICKHOUSE_HOST,
     port=CLICKHOUSE_PORT,
@@ -46,31 +44,29 @@ def run_consumer(topic_name='purchases'):
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     print(f"Конец партиции {msg.topic()} [{msg.partition()}] на offset {msg.offset()}")
                 else:
-                    print(f"❌ Kafka ошибка: {msg.error()}")
+                    print(f"Kafka ошибка: {msg.error()}")
                     raise KafkaException(msg.error())
                 continue
 
             try:
                 value_str = msg.value().decode('utf-8')
-                print("📥 Получено сообщение:", value_str)
+                print("Получено сообщение:", value_str)
                 record = json.loads(value_str)
             except Exception as e:
-                print(f"❌ Ошибка при обработке сообщения: {e}")
+                print(f"Ошибка при обработке сообщения: {e}")
                 continue
 
-            # Извлечение и логирование данных
             try:
                 sell_id = record['sell_id']
                 customer_id = record['customer_id']
                 product_id = record['product_id']
                 seller_id = record['seller_id']
                 quantity = record['quantity']
-                print("🔢 Данные для вставки:", sell_id, customer_id, product_id, seller_id, quantity)
+                print("Данные для вставки:", sell_id, customer_id, product_id, seller_id, quantity)
             except KeyError as e:
-                print(f"❌ Пропущено поле в данных: {e}")
+                print(f"Пропущено поле в данных: {e}")
                 continue
 
-            # Вставка в ClickHouse
             try:
                 ch_client.execute("""
                     INSERT INTO fact_sales (sale_id, customer_id, product_id, seller_id, quantity)
