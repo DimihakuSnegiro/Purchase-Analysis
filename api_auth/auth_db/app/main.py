@@ -37,11 +37,6 @@ class LoginUserRequest(BaseModel):
     user_login: str
     user_password: str
 
-@app.on_event("startup")
-async def startup():
-    db = next(get_db())
-    database.init_db(db) 
-
 @app.post("/register/")
 async def register_user(request: RegisterUserRequest, db: Session = Depends(get_db)):
     hashed_password = pwd_context.hash(request.user_password)
