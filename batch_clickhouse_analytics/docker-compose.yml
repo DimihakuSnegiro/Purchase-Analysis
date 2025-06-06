@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
-  minio1:
+  minio:
     image: minio/minio
-    container_name: minio1
+    container_name: minio
     ports:
-      - "9002:9000"
-      - "9003:9001"
+      - "9000:9000"
+      - "9001:9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -22,16 +20,16 @@ services:
     networks:
       - app-network
 
-  minio-init1:
+  minio-init:
     image: minio/mc
     depends_on:
-      minio1:
+      minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
         sleep 5;
         mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
-        mc mb myminio/${MINIO_BUCKET_NAME} || true;
+        mc mb myminio/${MINIO_BUCKET_NAME} true;
       "
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -47,9 +45,9 @@ services:
       dockerfile: Dockerfile
     container_name: iceberg-init
     depends_on:
-      minio1:
+      minio:
         condition: service_healthy
-      spark-master1:
+      spark-master:
         condition: service_started
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -88,7 +86,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres-init-scripts:/docker-entrypoint-initdb.d
@@ -101,24 +99,6 @@ services:
     networks:
       - app-network
 
-  clickhouse-consumer:
-    build:
-      context: ./kafka
-      dockerfile: Dockerfile
-    container_name: clickhouse-consumer
-    depends_on:
-      - clickhouse
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 9000
-      CLICKHOUSE_DB: default
-    env_file:
-      - .env
-    networks:
-      - app-network
-    restart: always
-        
   grafana:
     build:
       context: ./grafana
@@ -139,9 +119,9 @@ services:
     networks:
       - app-network
 
-  spark-master1:
+  spark-master:
     image: bitnami/spark:3.5
-    container_name: spark-master1
+    container_name: spark-master
     environment:
       SPARK_MODE: master
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
@@ -149,17 +129,17 @@ services:
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
       SPARK_SSL_ENABLED: "no"
     ports:
-      - "7078:7077"
-      - "8082:8080" 
+      - "7077:7077"
+      - "8080:8080"
     restart: unless-stopped
     networks:
       - app-network
 
-  spark-worker1:
+  spark-worker:
     image: bitnami/spark:3.5
-    container_name: spark-worker1
+    container_name: spark-worker
     depends_on:
-      spark-master1:
+      spark-master:
         condition: service_started
     environment:
       SPARK_MODE: worker
@@ -170,7 +150,7 @@ services:
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
       SPARK_SSL_ENABLED: "no"
     ports:
-      - "8083:8081"
+      - "8081:8081"
     restart: unless-stopped
     networks:
       - app-network
@@ -181,7 +161,7 @@ services:
       dockerfile: Dockerfile
     container_name: spark-batch
     depends_on:
-      - spark-master1
+      - spark-master
       - postgres
       - clickhouse
     environment:
@@ -196,15 +176,115 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
+    command: tail -f /dev/null
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  airflow-postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  airflow-init:
+    image: apache/airflow:2.8.1
+    container_name: airflow-init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__LOGGING__REMOTE_LOGGING: 'False'
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey1234567890"
+    volumes:
+      - airflow-logs:/opt/airflow/logs
+    entrypoint: >
+      /bin/bash -c "
+        until airflow db check; do
+          echo 'Waiting for database...';
+          sleep 5;
+        done;
+        airflow db init &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin
+      "
     restart: "no"
     networks:
       - app-network
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1
+    container_name: airflow-webserver
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+      AIRFLOW__WEBSERVER__WORKERS: 2
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__LOGGING__REMOTE_LOGGING: 'False'
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey1234567890"
+    ports:
+      - "8082:8080"
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+    restart: unless-stopped
+    networks:
+      - app-network
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1
+    container_name: airflow-scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__LOGGING__REMOTE_LOGGING: 'False'
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey1234567890"
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+    restart: unless-stopped
+    networks:
+      - app-network
+    command: scheduler
 
 volumes:
   minio-data:
   clickhouse-data:
   postgres-data:
   grafana-data:
+  airflow-logs:
 
 networks:
   app-network:

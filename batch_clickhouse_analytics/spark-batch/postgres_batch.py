@@ -43,7 +43,6 @@ def optimize_clickhouse_table(table_name):
     except Exception as e:
         logging.error(f"Failed to optimize ClickHouse table {table_name}: {e}")
 
-
 def sync_table(table_name, batch_time):
     logging.info(f"Start syncing table: {table_name}")
     try:
@@ -58,7 +57,21 @@ def sync_table(table_name, batch_time):
                 last_batch_time = "1970-01-01 00:00:00"
             logging.info(f"Last batch_time from ClickHouse: {last_batch_time}")
 
-        query = f"(SELECT * FROM {table_name} WHERE created_at > TIMESTAMP '{last_batch_time}') AS src"
+        if table_name == "customers":
+            id_col = "id AS customer_id"
+        elif table_name == "sellers":
+            id_col = "id AS seller_id"
+        else:
+            id_col = "*"
+            
+        query = f"""(SELECT 
+                        {id_col},
+                        username,
+                        created_at,
+                        updated_at
+                     FROM {table_name} 
+                     WHERE created_at > TIMESTAMP '{last_batch_time}') AS src"""
+        
         pg_df = spark.read.jdbc(postgres_url, query, properties=postgres_properties)
 
         if pg_df.rdd.isEmpty():
@@ -68,6 +81,7 @@ def sync_table(table_name, batch_time):
             logging.info(f"Found {count} new records to sync for {table_name}.")
 
             enriched_df = pg_df.withColumn("batch_time", lit(batch_time))
+            
             enriched_df.write \
                 .mode("append") \
                 .jdbc(clickhouse_url, table_name, properties=clickhouse_properties)
@@ -77,7 +91,6 @@ def sync_table(table_name, batch_time):
         logging.info(f"Finished syncing table: {table_name} ---\n")
     except Exception as e:
         logging.error(f"Error syncing table {table_name}: {e}")
-
 
 if __name__ == "__main__":
     current_batch_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')

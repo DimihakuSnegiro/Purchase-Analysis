@@ -1,8 +1,10 @@
 import os
+import time
 import datetime
 import logging
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
+from pyspark.sql.utils import AnalysisException
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,9 +16,7 @@ def create_spark_session(bucket_name, minio_endpoint, minio_user, minio_password
     logging.info("Создаём SparkSession...")
     spark = SparkSession.builder \
         .appName("iceberg-batch") \
-        .config("spark.jars", "/opt/spark-apps/jars/postgresql-42.6.0.jar," +
-                "/opt/spark-apps/jars/clickhouse-jdbc-0.4.6.jar," +
-                "/opt/spark-apps/jars/iceberg-spark-runtime-3.5_2.12.jar") \
+        .config("spark.jars", "/opt/spark-apps/jars/clickhouse-jdbc-0.4.6.jar," + "/opt/spark-apps/jars/iceberg-spark-runtime-3.5_2.12.jar") \
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkCatalog") \
         .config("spark.sql.catalog.spark_catalog.type", "hadoop") \
@@ -30,6 +30,22 @@ def create_spark_session(bucket_name, minio_endpoint, minio_user, minio_password
         .getOrCreate()
     logging.info("SparkSession создан.")
     return spark
+
+def wait_for_table(spark, catalog, db, table_name, delay_seconds=10):
+    logging.info(f"Ожидание таблицы {catalog}.{db}.{table_name}...")
+    while True:
+        try:
+            result = spark.sql(f"SHOW TABLES IN {catalog}.{db}") \
+                          .filter(f"tableName = '{table_name}'") \
+                          .collect()
+            if result:
+                logging.info(f"Таблица {catalog}.{db}.{table_name} найдена.")
+                break
+            else:
+                logging.info("Таблица ещё не создана. Повторная проверка через %s секунд...", delay_seconds)
+        except AnalysisException as e:
+            logging.warning(f"Ошибка при проверке таблицы: {e}")
+        time.sleep(delay_seconds)
 
 def get_latest_batch_time(spark, clickhouse_url, clickhouse_user, clickhouse_password):
     logging.info("Получаем последний batch_time из ClickHouse...")
@@ -79,7 +95,7 @@ def write_to_clickhouse(df, clickhouse_url, clickhouse_user, clickhouse_password
         .option("dbtable", "products") \
         .option("user", clickhouse_user) \
         .option("password", clickhouse_password) \
-        .option("driver", "ru.yandex.clickhouse.ClickHouseDriver") \
+        .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
         .mode("append") \
         .save()
     logging.info(f"Записано {df_with_batch.count()} строк в ClickHouse.")
@@ -96,6 +112,8 @@ def main():
     spark = create_spark_session(bucket_name, minio_endpoint, minio_user, minio_password)
 
     try:
+        wait_for_table(spark, catalog="spark_catalog", db="db", table_name="products")
+
         max_batch_time = get_latest_batch_time(spark, clickhouse_url, clickhouse_user, clickhouse_password)
         df_new = read_new_records(spark, max_batch_time)
         batch_start_time = datetime.datetime.now()

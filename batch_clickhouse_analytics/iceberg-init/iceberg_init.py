@@ -3,21 +3,21 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 import time
+from datetime import datetime
 
-bucket_name = os.getenv("MINIO_BUCKET_NAME", "warehouse")
-minio_user = os.getenv("MINIO_ROOT_USER", "admin")
-minio_password = os.getenv("MINIO_ROOT_PASSWORD", "password")
+bucket_name = os.getenv("MINIO_BUCKET_NAME")
+minio_user = os.getenv("MINIO_ROOT_USER")
+minio_password = os.getenv("MINIO_ROOT_PASSWORD")
 minio_endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 
-def wait_for_bucket(bucket_name, endpoint_url, access_key, secret_key, timeout=60):
+def wait_for_bucket(bucket_name, endpoint_url, access_key, secret_key):
     s3 = boto3.client(
         's3',
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
     )
-    start = time.time()
-    while time.time() - start < timeout:
+    while True:
         try:
             s3.head_bucket(Bucket=bucket_name)
             print(f"Бакет '{bucket_name}' найден в MinIO.")
@@ -25,7 +25,6 @@ def wait_for_bucket(bucket_name, endpoint_url, access_key, secret_key, timeout=6
         except ClientError as e:
             print(f"Ожидание бакета '{bucket_name}'... ({e.response['Error']['Message']})")
             time.sleep(3)
-    raise TimeoutError(f"Бакет '{bucket_name}' не найден в MinIO в течение {timeout} секунд.")
 
 wait_for_bucket(bucket_name, minio_endpoint, minio_user, minio_password)
 
@@ -45,9 +44,10 @@ spark = SparkSession.builder \
 
 try:
     spark.sql("CREATE NAMESPACE IF NOT EXISTS spark_catalog.db")
+
     spark.sql("""
         CREATE TABLE IF NOT EXISTS spark_catalog.db.products (
-            product_id STRING,
+            product_id BIGINT,
             product_name STRING,
             product_description STRING,
             category STRING,
